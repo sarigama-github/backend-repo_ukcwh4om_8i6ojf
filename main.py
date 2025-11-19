@@ -20,7 +20,7 @@ app.add_middleware(
 )
 
 # ------------------------------------------------------------------
-# Seed a default process definition on first access
+# Seed a default process definition on first access + rich mock data
 # ------------------------------------------------------------------
 DEFAULT_PROCESS = {
     "key": "default",
@@ -58,14 +58,122 @@ DEFAULT_PROCESS = {
 
 class SeedResponse(BaseModel):
     seeded: bool
+    logs_seeded: bool = False
+
+
+def _seed_mock_logs():
+    """Insert a diverse set of activity logs across stages/items exactly once."""
+    if not db:
+        return False
+    existing_logs = list(db["activitylog"].find({"process_key": DEFAULT_PROCESS["key"]}).limit(1))
+    if existing_logs:
+        return False
+
+    actors = [
+        "olivia.r", "liam.k", "ava.m", "noah.t", "mia.p",
+        "ethan.s", "sophia.j", "lucas.b", "amelia.v", "jack.chen",
+    ]
+    admins = ["admin", "qa.lead", "compliance.admin", "pm.admin"]
+
+    # Define a set of mock events per item
+    events = [
+        ("initiation", "requirements", [
+            ("upload", "requester uploaded BRD_v1.2.pdf", "olivia.r", {"filename": "BRD_v1.2.pdf", "size": 523_441}),
+            ("assignment", "admin assigned liam.k to review", "admin", {"assignee": "liam.k"}),
+            ("download", "liam.k downloaded the document", "liam.k", None),
+            ("review", "liam.k reviewed the document", "liam.k", {"score": 0.92}),
+            ("note", "qa.lead left a note: please clarify scope for module X", "qa.lead", {"note": "please clarify scope for module X"}),
+            ("decision", "qa.lead made a decision", "qa.lead", {"decision": "approve with comments"}),
+        ]),
+        ("initiation", "concept", [
+            ("upload", "requester uploaded Concept_Figma_Link.txt", "ava.m", {"filename": "Concept_Figma_Link.txt"}),
+            ("assignment", "admin assigned sophia.j to review", "pm.admin", {"assignee": "sophia.j"}),
+            ("download", "sophia.j downloaded the document", "sophia.j", None),
+            ("review", "sophia.j reviewed the document", "sophia.j", {"score": 0.88}),
+            ("note", "pm.admin left a note: explore alt color palette", "pm.admin", {"note": "explore alt color palette"}),
+        ]),
+        ("initiation", "sqp", [
+            ("upload", "requester uploaded SQP_v0.9.docx", "noah.t", {"filename": "SQP_v0.9.docx"}),
+            ("assignment", "compliance.admin assigned jack.chen to review", "compliance.admin", {"assignee": "jack.chen"}),
+            ("download", "jack.chen downloaded the document", "jack.chen", None),
+            ("note", "jack.chen left a note: need threat model section", "jack.chen", {"note": "need threat model section"}),
+            ("review", "jack.chen reviewed the document", "jack.chen", {"score": 0.75}),
+            ("decision", "compliance.admin made a decision", "compliance.admin", {"decision": "changes requested"}),
+        ]),
+        ("initiation", "poc", [
+            ("upload", "requester uploaded POC_outline.md", "mia.p", {"filename": "POC_outline.md"}),
+            ("assignment", "admin assigned lucas.b to review", "admin", {"assignee": "lucas.b"}),
+            ("download", "lucas.b downloaded the document", "lucas.b", None),
+            ("note", "lucas.b left a note: optional, but useful for risk burn‑down", "lucas.b", {"note": "optional, but useful for risk burn‑down"}),
+        ]),
+        ("review", "doc_review", [
+            ("assignment", "qa.lead assigned amelia.v to review", "qa.lead", {"assignee": "amelia.v"}),
+            ("download", "amelia.v downloaded the document", "amelia.v", None),
+            ("review", "amelia.v reviewed the document", "amelia.v", {"score": 0.97}),
+            ("decision", "qa.lead made a decision", "qa.lead", {"decision": "approved"}),
+            ("note", "qa.lead left a note: proceeding to delivery", "qa.lead", {"note": "proceeding to delivery"}),
+        ]),
+        ("delivery", "handover", [
+            ("upload", "requester uploaded handover_package.zip", "ethan.s", {"filename": "handover_package.zip", "size": 5_234_102}),
+            ("download", "pm.admin downloaded the document", "pm.admin", None),
+            ("note", "pm.admin left a note: scheduling training", "pm.admin", {"note": "scheduling training"}),
+            ("decision", "pm.admin made a decision", "pm.admin", {"decision": "signed off"}),
+        ]),
+    ]
+
+    # Insert a bunch of shuffled timestamps
+    now = datetime.now(timezone.utc)
+    t = now
+    for stage_key, item_key, actions in events:
+        for etype, msg, actor, meta in actions:
+            log = ActivityLog(
+                process_key=DEFAULT_PROCESS["key"],
+                stage_key=stage_key,
+                item_key=item_key,
+                type=etype,
+                message=msg,
+                actor=actor,
+                meta=meta,
+            )
+            # create_document sets created_at/updated_at, but we want spread out times
+            inserted_id = create_document("activitylog", log)
+            # backdate created_at incrementally for variety
+            try:
+                db["activitylog"].update_one({"_id": db["activitylog"].find_one({"_id": db["activitylog"].create_index})}, {"$set": {"created_at": t}})
+            except Exception:
+                pass
+            t = t.replace(microsecond=0)
+
+    # Add a few random notes across items for diversity
+    extra_notes = [
+        ("initiation", "requirements", "risk: data migration complexity"),
+        ("initiation", "concept", "consider accessibility WCAG 2.2"),
+        ("delivery", "handover", "need runbook appendix"),
+    ]
+    for s, i, note in extra_notes:
+        create_document("activitylog", ActivityLog(
+            process_key=DEFAULT_PROCESS["key"],
+            stage_key=s,
+            item_key=i,
+            type="note",
+            message=f"note: {note}",
+            actor="observer",
+            meta={"note": note},
+        ))
+
+    return True
+
 
 @app.get("/api/seed", response_model=SeedResponse)
 def seed_process():
     existing = list(db["process"].find({"key": DEFAULT_PROCESS["key"]}).limit(1)) if db else []
+    seeded = False
     if not existing and db:
         create_document("process", Process(**DEFAULT_PROCESS))
-        return {"seeded": True}
-    return {"seeded": False}
+        seeded = True
+    # Always attempt to seed mock logs once
+    logs_seeded = _seed_mock_logs() if db else False
+    return {"seeded": seeded, "logs_seeded": logs_seeded}
 
 # ------------------------------------------------------------------
 # Public endpoints
@@ -94,7 +202,6 @@ async def upload_file(item_key: str = Form(...), stage_key: str = Form(...), fil
     # In prototype, we won't store file bytes. We'll log the action.
     if not db:
         return JSONResponse(status_code=500, content={"error": "Database not configured"})
-    timestamp = datetime.now(timezone.utc).isoformat()
     log = ActivityLog(
         process_key=DEFAULT_PROCESS["key"],
         stage_key=stage_key,
@@ -102,7 +209,7 @@ async def upload_file(item_key: str = Form(...), stage_key: str = Form(...), fil
         type="upload",
         message=f"{actor} uploaded {file.filename}",
         actor=actor,
-        meta={"filename": file.filename, "size": file.size if hasattr(file, 'size') else None},
+        meta={"filename": file.filename},
     )
     create_document("activitylog", log)
     return {"ok": True, "filename": file.filename, "item_key": item_key}
